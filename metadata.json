@@ -1,0 +1,6 @@
+
+{
+  "name": "AI Receipt Scanner",
+  "description": "An intelligent application that allows users to upload a receipt image. It utilizes AI to automatically extract key details such as the store name, date, total amount, and a detailed list of items, presenting the information in a clear, organized format."
+}
+   
