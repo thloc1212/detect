@@ -1,35 +1,73 @@
-// Vercel serverless function to add CORS headers and proxy requests to the actual parse endpoint.
-// This lets web clients avoid CORS issues by calling the same-origin /api/parse.
+// Serverless function to parse receipt images using Google Gemini directly.
+// This avoids proxying to the same domain (which caused an infinite loop).
+import { GoogleGenAI, Type } from '@google/genai';
+
+const ai = new GoogleGenAI({ apiKey: process.env.API_KEY || process.env.GEMINI_API_KEY });
+
+function buildPrompt() {
+  return `Extract structured data (merchant, total, items, categories) from the given receipt text or image. Return JSON only.`;
+}
+
 export default async function handler(req, res) {
-  // Allow any origin (change to a specific origin in production if you prefer)
+  // CORS headers
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type,Authorization');
 
   if (req.method === 'OPTIONS') {
-    // Preflight request
     res.status(204).end();
     return;
   }
 
   try {
-    const target = 'https://detect-ruby.vercel.app/parse';
+    const { ocrText, imageBase64, mimeType = 'image/jpeg' } = req.body || {};
 
-    // Forward the incoming request body as JSON to the target
-    const forwardRes = await fetch(target, {
-      method: req.method,
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(req.body),
+    const contents = [{ role: 'user', parts: [{ text: buildPrompt() }] }];
+    if (ocrText) contents[0].parts.push({ text: `OCR:\n${ocrText}` });
+    if (imageBase64) {
+      contents[0].parts.push({ inlineData: { mimeType, data: imageBase64 } });
+    }
+
+    const response = await ai.models.generateContent({
+      model: 'gemini-2.5-flash',
+      contents,
+      config: {
+        responseMimeType: 'application/json',
+        responseSchema: {
+          type: Type.OBJECT,
+          properties: {
+            merchant: { type: Type.STRING },
+            total: { type: Type.NUMBER },
+            items: {
+              type: Type.ARRAY,
+              items: {
+                type: Type.OBJECT,
+                properties: {
+                  description: { type: Type.STRING },
+                  amount: { type: Type.NUMBER },
+                  category: { type: Type.STRING },
+                },
+              },
+            },
+          },
+        },
+      },
     });
 
-    const text = await forwardRes.text();
+    let data;
+    if (response && response.parsed) data = response.parsed;
+    else if (response && typeof response.text === 'string') {
+      try {
+        data = JSON.parse(response.text);
+      } catch (e) {
+        console.error('Failed to parse model text:', e, response.text);
+        data = { raw: response };
+      }
+    } else data = response ?? { message: 'No response from model' };
 
-    // Copy content-type from target
-    const contentType = forwardRes.headers.get('content-type') || 'application/json';
-    res.setHeader('Content-Type', contentType);
-    res.status(forwardRes.status).send(text);
+    res.json(data);
   } catch (err) {
-    console.error('Proxy /api/parse error:', err);
-    res.status(502).json({ error: 'Proxy error', detail: String(err) });
+    console.error('Error in /api/parse handler:', err);
+    res.status(500).json({ error: 'Parse failed', detail: String(err) });
   }
 }
