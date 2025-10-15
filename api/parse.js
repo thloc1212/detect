@@ -1,8 +1,34 @@
 // Serverless function to parse receipt images using Google Gemini directly.
 // This avoids proxying to the same domain (which caused an infinite loop).
 import { GoogleGenAI, Type } from '@google/genai';
+import fs from 'fs';
+import path from 'path';
 
-const ai = new GoogleGenAI({ apiKey: process.env.API_KEY || process.env.GEMINI_API_KEY });
+async function createClient() {
+  // Prefer API key if provided
+  const apiKey = process.env.API_KEY || process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY;
+  if (apiKey) {
+    return new GoogleGenAI({ apiKey });
+  }
+
+  // Fallback: accept base64-encoded service account JSON in env var SERVICE_ACCOUNT_JSON_BASE64
+  const saBase64 = process.env.SERVICE_ACCOUNT_JSON_BASE64 || process.env.GOOGLE_SERVICE_ACCOUNT_BASE64;
+  if (saBase64) {
+    try {
+      const json = Buffer.from(saBase64, 'base64').toString('utf8');
+      const dest = path.join('/tmp', `google-sa-${Date.now()}.json`);
+      await fs.promises.writeFile(dest, json, { encoding: 'utf8' });
+      process.env.GOOGLE_APPLICATION_CREDENTIALS = dest;
+      return new GoogleGenAI(); // SDK will pick up ADC from GOOGLE_APPLICATION_CREDENTIALS
+    } catch (err) {
+      console.error('Failed to write service account JSON from env:', err);
+      throw err;
+    }
+  }
+
+  // No credentials found - let the caller see an explicit error
+  throw new Error('No Google credentials found. Set API_KEY/GEMINI_API_KEY or SERVICE_ACCOUNT_JSON_BASE64.');
+}
 
 function buildPrompt() {
   return `Extract structured data (merchant, total, items, categories) from the given receipt text or image. Return JSON only.`;
@@ -21,6 +47,8 @@ export default async function handler(req, res) {
 
   try {
     const { ocrText, imageBase64, mimeType = 'image/jpeg' } = req.body || {};
+
+    const ai = await createClient();
 
     const contents = [{ role: 'user', parts: [{ text: buildPrompt() }] }];
     if (ocrText) contents[0].parts.push({ text: `OCR:\n${ocrText}` });
